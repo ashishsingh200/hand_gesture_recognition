@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hand Gesture Recognition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        #output { font-size: 1.5rem; margin-top: 0.5rem; text-align: center; }
+        canvas { border: 2px solid #d1d5db; max-width: 100%; height: auto; }
+        #browserWarning { display: none; color: red; text-align: center; margin-top: 1rem; }
+        #debugInfo { display: block; font-size: 0.9rem; text-align: center; margin-top: 1rem; color: #666; }
+        @media (max-width: 640px) {
+            #output { font-size: 1.2rem; }
+            .container { padding: 0.5rem; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto p-4 sm:p-6">
+        <h1 class="text-2xl sm:text-3xl font-bold text-center mb-4">✋ Hand Gesture Recognition</h1>
+        <p class="text-center mb-4 text-sm sm:text-base">Click below to start the webcam and predict numbers (0-9) in real-time.</p>
+        <p id="browserWarning" class="text-center">Your browser does not support webcam access. Please use Chrome (90+) or Safari (11+).</p>
+        <p id="debugInfo" class="text-center"></p>
+        
+        <div class="flex justify-center mb-4 space-x-2">
+            <button id="numbersBtn" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 text-sm sm:text-base">Start Predicting Numbers</button>
+            <button id="lettersBtn" class="bg-gray-400 text-white px-4 py-2 rounded cursor-not-allowed text-sm sm:text-base" disabled>Predict Letters</button>
+            <button id="wordsBtn" class="bg-gray-400 text-white px-4 py-2 rounded cursor-not-allowed text-sm sm:text-base" disabled>Predict Words</button>
+        </div>
+        <div class="flex justify-center mb-4 space-x-2">
+            <select id="cameraSelect" class="px-4 py-2 rounded border border-gray-300 text-sm sm:text-base">
+                <option value="user">Front Camera</option>
+                <option value="environment">Back Camera</option>
+            </select>
+            <button id="permissionBtn" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 text-sm sm:text-base">Request Camera Permission</button>
+        </div>
+        
+        <div class="flex justify-center">
+            <video id="webcam" class="hidden"></video>
+            <canvas id="canvas" class="border-2 border-gray-300"></canvas>
+        </div>
+        <p id="output" class="text-center">Click "Start Predicting Numbers" to begin.</p>
+    </div>
+
+    <script>
+        // Set the API base URL from ngrok
+        const API_BASE_URL = 'https://dee252739855.ngrok-free.app';
+
+        // Enhanced WebRTC polyfill
+        (function() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices = navigator.mediaDevices || {};
+                navigator.mediaDevices.getUserMedia = function(constraints) {
+                    const getUserMedia = navigator.getUserMedia || 
+                                        navigator.webkitGetUserMedia || 
+                                        navigator.mozGetUserMedia || 
+                                        navigator.msGetUserMedia;
+                    if (!getUserMedia) {
+                        return Promise.reject(new Error('getUserMedia is not supported in this browser'));
+                    }
+                    return new Promise((resolve, reject) => {
+                        getUserMedia.call(navigator, constraints, resolve, reject);
+                    });
+                };
+            }
+        })();
+
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const output = document.getElementById('output');
+        const numbersBtn = document.getElementById('numbersBtn');
+        const lettersBtn = document.getElementById('lettersBtn');
+        const wordsBtn = document.getElementById('wordsBtn');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const permissionBtn = document.getElementById('permissionBtn');
+        const browserWarning = document.getElementById('browserWarning');
+        const debugInfo = document.getElementById('debugInfo');
+
+        // Debug WebRTC support
+        const webrtcSupported = !!window.RTCPeerConnection;
+        const mediaDevicesAvailable = !!navigator.mediaDevices;
+        const getUserMediaAvailable = !!navigator.mediaDevices?.getUserMedia;
+        console.log('Navigator:', navigator);
+        console.log('navigator.mediaDevices:', navigator.mediaDevices);
+        console.log('getUserMedia available:', getUserMediaAvailable);
+        console.log('WebRTC support:', webrtcSupported);
+        console.log('User Agent:', navigator.userAgent);
+
+        // Display browser and WebRTC info
+        debugInfo.style.display = 'block';
+        debugInfo.textContent = `Browser: ${navigator.userAgent.substring(0, 100)}...\nWebRTC Support: ${webrtcSupported ? 'Yes' : 'No'}\ngetUserMedia: ${getUserMediaAvailable ? 'Available' : 'Not Available'}`;
+
+        // Check browser compatibility
+        if (!mediaDevicesAvailable || !getUserMediaAvailable) {
+            browserWarning.style.display = 'block';
+            output.textContent = 'Webcam not supported. Please use Chrome (90+) or Safari (11+).';
+            console.error('WebRTC not supported in this browser.');
+        }
+
+        // Start webcam with mobile optimization
+        let stream = null;
+        async function startWebcam() {
+            if (stream) {
+                console.log('Webcam already running');
+                return;
+            }
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('navigator.mediaDevices.getUserMedia is not available. Ensure HTTPS and a compatible browser (Chrome 90+ or Safari 11+).');
+                }
+                const facingMode = cameraSelect.value;
+                console.log(`Requesting camera: ${facingMode}`);
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: facingMode
+                    }
+                });
+                videoElement.srcObject = stream;
+                videoElement.play();
+                videoElement.onloadedmetadata = () => {
+                    canvasElement.width = videoElement.videoWidth;
+                    canvasElement.height = videoElement.videoHeight;
+                    console.log(`Webcam resolution: ${canvasElement.width}x${canvasElement.height}`);
+                    startPrediction();
+                };
+                console.log('Webcam started successfully');
+                output.textContent = 'Webcam started. Show a hand gesture to predict.';
+            } catch (error) {
+                console.error('Error starting webcam:', error);
+                output.textContent = `Error starting webcam: ${error.message}. Please allow camera access, use HTTPS, and try Chrome (90+) or Safari (11+).`;
+                browserWarning.style.display = 'block';
+            }
+        }
+
+        // Start real-time prediction interval
+        let predictionInterval = null;
+        function startPrediction() {
+            if (predictionInterval) clearInterval(predictionInterval);
+            predictionInterval = setInterval(async () => {
+                if (mode !== 'numbers' || !stream) return;
+                try {
+                    canvasCtx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+                    const base64Image = canvasElement.toDataURL('image/jpeg', 0.8).split(',')[1];
+                    
+                    console.log('Sending prediction request to:', `${API_BASE_URL}/predict_image`);
+                    const response = await fetch(`${API_BASE_URL}/predict_image`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: base64Image, mode: mode })
+                    });
+                    const data = await response.json();
+                    if (data.error) {
+                        output.textContent = data.error;
+                        console.error('Prediction error:', data.error);
+                    } else {
+                        output.textContent = `Predicted: ${data.prediction} (${(data.confidence * 100).toFixed(2)}%)`;
+                        console.log('Prediction:', data);
+                    }
+                } catch (error) {
+                    output.textContent = `Error predicting! Ensure the server is reachable at ${API_BASE_URL}.`;
+                    console.error('Fetch error:', error);
+                }
+            }, 1000); // Predict every 1000ms
+        }
+
+        // Button event listeners
+        let mode = null;
+        numbersBtn.addEventListener('click', () => {
+            mode = 'numbers';
+            numbersBtn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+            numbersBtn.classList.remove('bg-gray-400');
+            lettersBtn.classList.add('bg-gray-400');
+            wordsBtn.classList.add('bg-gray-400');
+            output.textContent = 'Starting webcam...';
+            console.log('Mode set to numbers');
+            startWebcam();
+        });
+
+        permissionBtn.addEventListener('click', () => {
+            output.textContent = 'Requesting camera permission...';
+            startWebcam();
+        });
+
+        // Stop webcam when page is unloaded
+        window.addEventListener('beforeunload', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                clearInterval(predictionInterval);
+            }
+        });
+    </script>
+</body>
+</html>

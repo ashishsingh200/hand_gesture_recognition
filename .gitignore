@@ -1,0 +1,64 @@
+pycache/
+*.pyc
+*.pyd
+*.so
+
+#Environments
+.venv
+venv/
+env/
+/bin
+/include
+/lib
+/lib64
+*.egg-info/
+.python-version
+
+#Distribution / Packaging
+.tox/
+.apsw/
+dist/
+build/
+*.egg
+
+
+
+#IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.bak
+*.swo
+
+#Jupyter / IPython Notebook
+.ipynb_checkpoints
+
+#Machine Learning & Data Artifacts
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.tf
+*.onnx
+
+#Data Files (Never commit large, raw data files)
+data/
+datasets/
+*.csv
+*.tsv
+*.data
+*.zip
+*.parquet
+
+#Logs and other temporary outputs
+logs/
+*.log
+tmp/
+temp/
+
+
+
+#Service Account and Credential Files (CRITICAL: NEVER COMMIT THESE)
+*.json
+credentials.json
+service-account.json

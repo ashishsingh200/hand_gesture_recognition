@@ -1,7 +1,10 @@
 streamlit
 numpy
-pandas
 Pillow
-opencv-python
+# Use the headless version for better compatibility on Streamlit Cloud
+opencv-python-headless
 mediapipe
 streamlit-webrtc
+# Add your ML libraries here:
+scikit-learn
+xgboost

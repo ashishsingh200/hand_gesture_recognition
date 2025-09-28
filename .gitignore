@@ -33,13 +33,6 @@ build/
 #Jupyter / IPython Notebook
 .ipynb_checkpoints
 
-#Machine Learning & Data Artifacts
-*.pkl
-*.pickle
-*.joblib
-*.h5
-*.tf
-*.onnx
 
 #Data Files (Never commit large, raw data files)
 data/

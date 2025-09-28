@@ -1,146 +1,238 @@
-import flask
+import streamlit as st
 import pickle
 import numpy as np
-from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
-import logging
+from PIL import Image
 import cv2
-import mediapipe as mp
-import base64
 from io import BytesIO
+from streamlit_drawable_canvas import st_canvas  # Requires: pip install streamlit-drawable-canvas
 
-# Logger setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Custom CSS for a beautiful and user-friendly UI
+st.markdown("""
+    <style>
+    /* Global styles */
+    body {
+        background-color: #f0f4f8;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        color: #333;
+    }
+    .stApp {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+        background-color: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+        color: #007bff;
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+    .stSelectbox, .stFileUploader, .stButton {
+        margin-bottom: 1rem;
+    }
+    .stButton > button {
+        background-color: #007bff;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 0.75rem 1.5rem;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+    .stButton > button:hover {
+        background-color: #0056b3;
+    }
+    .prediction-result {
+        background-color: #e9f7ff;
+        border: 1px solid #007bff;
+        border-radius: 8px;
+        padding: 1.5rem;
+        text-align: center;
+        font-size: 1.2rem;
+        margin-top: 1rem;
+    }
+    .uploaded-image {
+        display: block;
+        margin: 1rem auto;
+        max-width: 100%;
+        border-radius: 8px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    }
+    .sidebar .stSelectbox {
+        background-color: #f8f9fa;
+        border-radius: 6px;
+        padding: 0.5rem;
+    }
+    .canvas-container {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 1rem;
+        background-color: #fff;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for browser requests
+# Paths to models and labels (update if needed)
+CHAR_NUM_MODEL_PATH = 'character and numbers/models/best_model.p'
+CHAR_NUM_LABELS_PATH = 'character and numbers/models/labels.p'
 
-# Paths to model and encoder
-MODEL_NAME = '/Users/ashishsingh/Desktop/Sign/models/best_model.p'
-LABEL_ENCODER_NAME = '/Users/ashishsingh/Desktop/Sign/models/labels.p'
+CHAR_MODEL_PATH = 'characters/models/best_model.p'
+CHAR_LABELS_PATH = 'characters/models/labels.p'
 
-# Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=True,
-    min_detection_confidence=0.3
-)
+NUM_MODEL_PATH = 'Numbers/models/best_model.p'
+NUM_LABELS_PATH = 'Numbers/models/labels.p'
 
-# Load model and label encoder
-def load_model_and_encoder():
-    try:
-        # Load model
-        with open(MODEL_NAME, 'rb') as f:
-            model_data = pickle.load(f)
-        
-        # Check if model_data is a dictionary and extract the model
-        if isinstance(model_data, dict):
-            logger.info("Loaded model is a dictionary. Attempting to extract 'model' key.")
-            if 'model' in model_data:
-                model = model_data['model']
-            else:
-                raise ValueError("Dictionary loaded from model file does not contain 'model' key.")
-        else:
-            model = model_data
-        
-        # Verify model has predict method
-        if not hasattr(model, 'predict'):
-            raise ValueError(f"Loaded model of type {type(model)} does not have a 'predict' method. Ensure it's a scikit-learn model.")
-        
-        # Load label encoder
-        with open(LABEL_ENCODER_NAME, 'rb') as f:
-            le = pickle.load(f)
-        
-        logger.info("Model and label encoder loaded successfully.")
-        return model, le
-    except Exception as e:
-        logger.error(f"Error loading model or encoder: {e}")
-        raise
+# Placeholder for word model (add your actual paths when ready)
+WORD_MODEL_PATH = 'words/models/best_model.p'  
+WORD_LABELS_PATH = 'words/models/labels.p'    
 
+# Function to load model and labels
+@st.cache_resource
+def load_model_and_labels(model_path, labels_path):
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    with open(labels_path, 'rb') as f:
+        labels = pickle.load(f)
+    return model, labels
+
+# Load all models
+char_num_model, char_num_labels = load_model_and_labels(CHAR_NUM_MODEL_PATH, CHAR_NUM_LABELS_PATH)
+char_model, char_labels = load_model_and_labels(CHAR_MODEL_PATH, CHAR_LABELS_PATH)
+num_model, num_labels = load_model_and_labels(NUM_MODEL_PATH, NUM_LABELS_PATH)
+
+# Load word model (comment out if not ready, or handle gracefully)
 try:
-    model, le = load_model_and_encoder()
-except Exception as e:
-    logger.error(f"Failed to initialize model: {e}")
-    raise
+    word_model, word_labels = load_model_and_labels(WORD_MODEL_PATH, WORD_LABELS_PATH)
+except FileNotFoundError:
+    word_model, word_labels = None, None
+    st.warning("Word model not found. Word prediction will use character+number model with segmentation as fallback.")
 
-@app.route('/')
-def index():
-    logger.info("Root endpoint accessed")
-    return render_template('index.html')
+# Preprocess image (assuming 28x28 grayscale, flattened, normalized)
+def preprocess_image(image):
+    if isinstance(image, np.ndarray):
+        img = Image.fromarray(image).convert('L')
+    else:
+        img = Image.open(image).convert('L')
+    img = img.resize((28, 28))  # Resize to model input size (adjust if your model uses different size)
+    img_array = np.array(img).flatten() / 255.0  # Flatten and normalize
+    return img_array.reshape(1, -1)  # 2D for model predict
 
-@app.route('/favicon.ico')
-def favicon():
-    logger.info("Favicon endpoint accessed")
-    return '', 204
+# Predict single item
+def predict_single(model, labels, image):
+    features = preprocess_image(image)
+    pred_index = model.predict(features)[0]
+    return labels[pred_index]
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        data = request.get_json()
-        mode = data.get('mode', 'numbers')
-        features = np.array(data['features']).reshape(1, -1)
-        logger.info(f"Received mode: {mode}, features shape: {features.shape}, features: {data['features']}")
+# Word prediction with segmentation (using OpenCV for contour detection)
+def predict_word(image, use_fallback=True):
+    # If word model exists, use it; else fallback to segmentation with char_num_model
+    if word_model is not None:
+        # Assuming word_model predicts on whole image or preprocessed sequence (adjust as per your model)
+        features = preprocess_image(image)  # Placeholder; update if word model differs
+        pred = word_model.predict(features)[0]
+        return word_labels[pred] if isinstance(word_labels, list) else word_labels[pred]
+    elif use_fallback:
+        # Fallback: Segment image into characters using char_num_model
+        if isinstance(image, BytesIO):
+            image.seek(0)
+            buf = np.frombuffer(image.read(), np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+        elif isinstance(image, np.ndarray):
+            img = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
+        else:
+            img = np.array(Image.open(image).convert('L'))
         
-        if mode != 'numbers':
-            return jsonify({'error': f"Mode '{mode}' not supported. Only 'numbers' is supported."}), 400
+        # Thresholding
+        _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
         
-        if features.shape[1] != 84:
-            return jsonify({'error': f"Expected 84 features, got {features.shape[1]}"}), 400
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        prediction = model.predict(features)[0]
-        prediction_label = le.inverse_transform([prediction])[0]
-        confidence = model.predict_proba(features)[0].max()
-        logger.info(f"Prediction: {prediction_label}, Confidence: {confidence}")
-        return jsonify({'prediction': prediction_label, 'confidence': float(confidence)})
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        return jsonify({'error': str(e)}), 500
+        # Sort contours left to right
+        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+        
+        word = ''
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            if w * h < 100:  # Ignore small noise (adjust threshold as needed)
+                continue
+            char_img = img[y:y+h, x:x+w]
+            char_img = cv2.resize(char_img, (28, 28)) / 255.0
+            features = char_img.flatten().reshape(1, -1)
+            pred_index = char_num_model.predict(features)[0]
+            word += char_num_labels[pred_index]
+        return word
+    else:
+        return "Word model not available."
 
-@app.route('/predict_image', methods=['POST'])
-def predict_image():
-    try:
-        data = request.get_json()
-        mode = data.get('mode', 'numbers')
-        base64_image = data['image']
-        
-        if mode != 'numbers':
-            return jsonify({'error': f"Mode '{mode}' not supported. Only 'numbers' is supported."}), 400
-        
-        # Decode base64 image
-        image_data = base64.b64decode(base64_image)
-        image_array = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Extract features using MediaPipe
-        results = hands.process(img_rgb)
-        if not results.multi_hand_landmarks:
-            return jsonify({'error': 'No hand detected'}), 400
-        
-        features = [0] * 84  # 2 hands * 21 landmarks * 2 coords
-        for i, hand_landmarks in enumerate(results.multi_hand_landmarks[:2]):
-            x_ = [landmark.x for landmark in hand_landmarks.landmark]
-            y_ = [landmark.y for landmark in hand_landmarks.landmark]
-            min_x = min(x_)
-            min_y = min(y_)
-            hand_data = []
-            for landmark in hand_landmarks.landmark:
-                hand_data.append(landmark.x - min_x)
-                hand_data.append(landmark.y - min_y)
-            start_idx = i * 42
-            features[start_idx:start_idx + 42] = hand_data
-        
-        # Predict using model
-        features_array = np.array(features).reshape(1, -1)
-        prediction = model.predict(features_array)[0]
-        prediction_label = le.inverse_transform([prediction])[0]
-        confidence = model.predict_proba(features_array)[0].max()
-        logger.info(f"Prediction: {prediction_label}, Confidence: {confidence}")
-        return jsonify({'prediction': prediction_label, 'confidence': float(confidence)})
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        return jsonify({'error': str(e)}), 500
+# Main app
+st.title("Character, Number, and Word Predictor")
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=9800)
+# Sidebar for mode selection
+mode = st.sidebar.selectbox("Select Prediction Mode", ["Character (A-Z)", "Number (0-9)", "Alphanumeric (A-Z + 0-9)", "Word"])
+
+# Tabs for input methods
+tab1, tab2 = st.tabs(["Upload Image", "Live Drawing"])
+
+with tab1:
+    st.subheader("Upload an Image")
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
+    
+    if uploaded_file is not None:
+        # Display uploaded image
+        st.image(uploaded_file, caption="Uploaded Image", use_column_width=True, cls="uploaded-image")
+        
+        if st.button("Predict"):
+            if mode == "Character (A-Z)":
+                result = predict_single(char_model, char_labels, uploaded_file)
+            elif mode == "Number (0-9)":
+                result = predict_single(num_model, num_labels, uploaded_file)
+            elif mode == "Alphanumeric (A-Z + 0-9)":
+                result = predict_single(char_num_model, char_num_labels, uploaded_file)
+            elif mode == "Word":
+                result = predict_word(uploaded_file)
+            
+            st.markdown(f'<div class="prediction-result">Predicted: <strong>{result}</strong></div>', unsafe_allow_html=True)
+
+with tab2:
+    st.subheader("Draw Live")
+    st.write("Draw below, and the prediction will update in real-time as you draw.")
+    
+    # Drawing canvas
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
+        stroke_width=20,
+        stroke_color="#000000",
+        background_color="#FFFFFF",
+        update_streamlit=True,  # Real-time update
+        height=200,
+        width=600 if mode == "Word" else 200,  # Wider for words
+        drawing_mode="freedraw",
+        key="canvas",
+    )
+    
+    # Predict if canvas has been drawn on
+    if canvas_result.image_data is not None:
+        # Convert canvas to image (remove alpha channel if present)
+        img_data = canvas_result.image_data
+        if img_data.shape[2] == 4:  # RGBA
+            img_data = img_data[:, :, :3]  # RGB
+        
+        # Grayscale for prediction
+        gray_img = np.dot(img_data[..., :3], [0.299, 0.587, 0.114])  # Simple RGB to gray
+        
+        # Threshold to make it binary-like (for better prediction)
+        gray_img = np.where(gray_img < 128, 0, 255).astype(np.uint8)
+        
+        if mode == "Character (A-Z)":
+            result = predict_single(char_model, char_labels, gray_img)
+        elif mode == "Number (0-9)":
+            result = predict_single(num_model, num_labels, gray_img)
+        elif mode == "Alphanumeric (A-Z + 0-9)":
+            result = predict_single(char_num_model, char_num_labels, gray_img)
+        elif mode == "Word":
+            result = predict_word(gray_img)
+        
+        st.markdown(f'<div class="prediction-result">Predicted: <strong>{result}</strong></div>', unsafe_allow_html=True)

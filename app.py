@@ -1,444 +1,259 @@
 import streamlit as st
-import pickle
-import numpy as np
-import os
-from PIL import Image
-import time
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import cv2
+import numpy as np
+import pickle
 import mediapipe as mp
-import av # Required for streamlit_webrtc frame processing
+import av
+import os
 
-# --- External Libraries for Live Stream (MUST BE INSTALLED) ---
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, ClientSettings
+# Custom CSS for a clean UI
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #f0f4f8;
+        font-family: 'Arial', sans-serif;
+    }
+    .stButton > button {
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 16px;
+        margin: 4px 2px;
+        cursor: pointer;
+        border-radius: 4px;
+    }
+    .stButton > button:hover {
+        background-color: #45a049;
+    }
+    .stSelectbox > div {
+        background-color: white;
+        border-radius: 4px;
+        padding: 5px;
+    }
+    h1, h2 {
+        color: #333;
+    }
+    .prediction {
+        font-size: 24px;
+        font-weight: bold;
+        color: #4CAF50;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# --- 1. CONFIGURATION AND UTILITIES ---
+# Model directories (relative to repo root)
+COMBINED_MODEL_DIR = "character and numbers/models"
+CHARS_MODEL_DIR = "characters/models"
+NUMS_MODEL_DIR = "Numbers/models"
 
-# Initialize MediaPipe Hands and Drawing Utilities globally
+# Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-mp_drawing = mp.solutions.drawing_utils
-
-# Define the relative paths for the models
-MODEL_BASE_DIR = "models" 
-MODEL_PATHS = {
-    "Characters & Numbers": {
-        "model": 'character and numbers/models/best_model.p',
-        "labels": 'character and numbers/models/labels.p',
-    },
-    "Characters Only": {
-        "model": 'characters/models/best_model.p',
-        "labels":'characters/models/labels.p',
-    },
-    "Numbers Only": {
-        "model": 'numbers/models/best_model.p',
-        "labels": 'numbers/models/labels.p',
-    },
-    "Words": {
-        "model": 'words/models/best_model',
-        "labels": 'words/models/labels.p',
-    },
-}
-
-# RTC configuration for webcam access
-RTC_CONFIGURATION = ClientSettings(
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    media_stream_constraints={"video": True, "audio": False}
+    static_image_mode=False,  # Real-time processing
+    max_num_hands=2,
+    min_detection_confidence=0.3
 )
 
+# Cache model loading
 @st.cache_resource
-def load_model_assets(mode):
-    """Loads the model and label encoder for the selected mode."""
-    st.info(f"Attempting to load assets for: {mode}")
-    paths = MODEL_PATHS.get(mode)
-    
-    if not paths:
-        st.error(f"Configuration error: Paths for mode '{mode}' not found.")
-        return None, None
-    
-    model_path = paths["model"]
-    labels_path = paths["labels"]
-
+def load_model(model_dir):
     try:
-        # Load Model
+        model_path = os.path.join(model_dir, 'best_model.p')
+        labels_path = os.path.join(model_dir, 'labels.p')
         with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
-            model = model_data.get('model')
-            
-        # Load Labels
+            data = pickle.load(f)
+            model = data['model']  # Match save_best_model structure
         with open(labels_path, 'rb') as f:
             le = pickle.load(f)
-        
-        st.success(f"Successfully loaded model for {mode}!")
         return model, le
-    except FileNotFoundError as e:
-        # Creating mock assets if the real files are not found (robust fallback)
-        st.error(f"Model/Label file not found at: {e.filename}. Using mock assets. **Upload your model files!**")
-        return create_mock_assets(mode)
     except Exception as e:
-        st.error(f"An error occurred loading the model assets for {mode}: {e}")
-        return create_mock_assets(mode)
+        st.error(f"Error loading model from {model_dir}: {str(e)}")
+        return None, None
 
+# Load all models
+combined_model, combined_le = load_model(COMBINED_MODEL_DIR)
+chars_model, chars_le = load_model(CHARS_MODEL_DIR)
+nums_model, nums_le = load_model(NUMS_MODEL_DIR)
 
-def create_mock_assets(mode):
-    """Creates mock model and label encoder for demonstration purposes."""
-    class MockModel:
-        def predict(self, X):
-            return np.array([np.random.randint(0, len(self.classes))])
-        def predict_proba(self, X):
-            # Mock confidence
-            probs = np.random.rand(1, len(self.classes))
-            probs /= probs.sum(axis=1, keepdims=True)
-            return probs
-
-    class MockLabelEncoder:
-        def __init__(self, classes):
-            self.classes = classes
-            
-        def inverse_transform(self, y):
-            return np.array([self.classes[i] for i in y])
-    
-    if "Numbers" in mode:
-        classes = [str(i) for i in range(10)]
-    elif "Characters" in mode:
-        classes = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-    elif mode == "Words":
-        classes = ["HELLO", "YES", "NO", "THANK YOU"]
-    else:
-        classes = list('A0B1C2') # Mixed
-        
-    mock_model = MockModel()
-    mock_model.classes = classes
-    mock_le = MockLabelEncoder(classes)
-    
-    return mock_model, mock_le
-
-
-# --- 2. CORE ML LOGIC (REAL IMPLEMENTATION) ---
-
-def process_and_extract_features(image_rgb, hands_model):
-    """
-    Processes an image (BGR) to detect hand landmarks and extract 
-    the 63-feature vector, and draws the landmarks.
-    Returns: features (np.array), annotated_image (np.array), hand_detected (bool)
-    """
-    # Convert the BGR image to RGB for MediaPipe
-    image_rgb.flags.writeable = False
-    results = hands_model.process(image_rgb)
-    image_rgb.flags.writeable = True
-
-    h, w, c = image_rgb.shape
-    features = np.zeros((1, 63), dtype=np.float32)
-    hand_detected = False
-
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            
-            # 1. Draw landmarks on the image
-            mp_drawing.draw_landmarks(
-                image_rgb,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS,
-                mp_drawing.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
-                mp_drawing.DrawingSpec(color=(245, 66, 230), thickness=2, circle_radius=2)
-            )
-
-            # 2. Extract and Normalize Features
-            # Flatten the 21 landmarks (x, y, z) into a 63-element array
-            
-            # Find center of the hand (e.g., wrist) for normalization
-            wrist_x = hand_landmarks.landmark[0].x
-            wrist_y = hand_landmarks.landmark[0].y
-            
-            # Create a list to hold the 63 normalized coordinates
-            feature_list = []
-            
-            for landmark in hand_landmarks.landmark:
-                # Normalize all coordinates relative to the wrist (0, 0)
-                # and append to the list
-                feature_list.append(landmark.x - wrist_x)
-                feature_list.append(landmark.y - wrist_y)
-                # Note: Z is often used, but sometimes omitted or normalized differently. 
-                # Assuming (x, y, z) for 63 features as standard.
-                feature_list.append(landmark.z - hand_landmarks.landmark[0].z) 
-                
-            features = np.array([feature_list], dtype=np.float32)
-            hand_detected = True
-            break # Only process the first detected hand
-
-    # Convert back to BGR for OpenCV display compatibility
-    return features, image_rgb, hand_detected
-
-
-def predict_sign(model, le, features):
-    """Performs the prediction using the loaded model."""
-    if model is None or le is None:
-        return "Model Error", "0.00%", None
-
+# Preprocessing function with MediaPipe hand landmarks
+def preprocess_image(image):
     try:
-        # 1. Predict the label index
-        prediction_index = model.predict(features)[0]
+        # Convert BGR to RGB
+        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Process with MediaPipe
+        results = hands.process(img_rgb)
+        if not results.multi_hand_landmarks:
+            return None, None, None
         
-        # 2. Inverse transform the index to get the class name
-        predicted_sign = le.inverse_transform([prediction_index])[0]
-
-        # 3. Get probability/confidence
-        if hasattr(model, 'predict_proba'):
-             probabilities = model.predict_proba(features)[0]
-             confidence = probabilities[prediction_index] * 100
-        else:
-             # Fallback confidence for models like SVC without probability=True
-             confidence = 99.99
-             
-        return predicted_sign, f"{confidence:.2f}%", prediction_index
+        features = [0] * 84  # 2 hands * 21 landmarks * 2 coords
+        for i, hand_landmarks in enumerate(results.multi_hand_landmarks[:2]):
+            x_ = [landmark.x for landmark in hand_landmarks.landmark]
+            y_ = [landmark.y for landmark in hand_landmarks.landmark]
+            min_x = min(x_)
+            min_y = min(y_)
+            hand_data = []
+            for landmark in hand_landmarks.landmark:
+                hand_data.append(landmark.x - min_x)
+                hand_data.append(landmark.y - min_y)
+            start_idx = i * 42
+            features[start_idx:start_idx + 42] = hand_data
         
+        # Compute bounding box for hand(s)
+        h, w = image.shape[:2]
+        bboxes = []
+        for hand_landmarks in results.multi_hand_landmarks[:2]:
+            x_coords = [landmark.x * w for landmark in hand_landmarks.landmark]
+            y_coords = [landmark.y * h for landmark in hand_landmarks.landmark]
+            x_min, x_max = int(min(x_coords)), int(max(x_coords))
+            y_min, y_max = int(min(y_coords)), int(max(y_coords))
+            # Expand box slightly
+            padding = 20
+            x_min = max(0, x_min - padding)
+            x_max = min(w, x_max + padding)
+            y_min = max(0, y_min - padding)
+            y_max = min(h, y_max + padding)
+            bboxes.append((x_min, y_min, x_max, y_max))
+        
+        # Merge bboxes if two hands are close
+        if len(bboxes) == 2:
+            x1_1, y1_1, x2_1, y2_1 = bboxes[0]
+            x1_2, y1_2, x2_2, y2_2 = bboxes[1]
+            # Check if boxes overlap or are close
+            if (abs(x1_1 - x1_2) < 50 and abs(y1_1 - y1_2) < 50) or \
+               (abs(x2_1 - x2_2) < 50 and abs(y2_1 - y2_2) < 50):
+                x_min = min(x1_1, x1_2)
+                y_min = min(y1_1, y1_2)
+                x_max = max(x2_1, x2_2)
+                y_max = max(y2_1, y2_2)
+                bboxes = [(x_min, y_min, x_max, y_max)]
+        
+        return np.array(features).reshape(1, -1), bboxes, None
     except Exception as e:
-        # st.error(f"Prediction Error: {e}") # Do not show in the video stream
-        return "Error", "0.00%", None
+        st.error(f"Preprocessing error: {str(e)}")
+        return None, None, None
 
+# Prediction function
+def predict(model, le, image, threshold=0.7):
+    if model is None or le is None:
+        return None, 0.0
+    features, bboxes, _ = preprocess_image(image)
+    if features is None:
+        return None, 0.0
+    try:
+        probs = model.predict_proba(features)[0]
+        max_prob = np.max(probs)
+        if max_prob > threshold:
+            pred = np.argmax(probs)
+            label = le.inverse_transform([pred])[0]
+            return str(label), max_prob
+        else:
+            return None, 0.0
+    except Exception as e:
+        st.error(f"Prediction error: {str(e)}")
+        return None, 0.0
 
-# --- 3. VIDEO TRANSFORMER FOR LIVE STREAMING ---
-
-class MLVideoTransformer(VideoTransformerBase):
-    """
-    Video Transformer for streamlit-webrtc. Processes frames in real-time.
-    """
-    def __init__(self, model, le):
+# Video Processor for stable predictions on dynamic bounding box
+class VideoProcessor:
+    def __init__(self, model, le, facing_mode):
         self.model = model
         self.le = le
-        self.hands_model = hands # Global MediaPipe hands instance
-        self.prediction_result = "START"
+        self.facing_mode = facing_mode
+        self.frame_count = 0
+        self.prev_label = None
+        self.stable_count = 0
+        self.stable_label = None
+        self.stable_prob = 0.0
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        # Convert av.VideoFrame to numpy array (BGR format for OpenCV)
-        image = frame.to_ndarray(format="bgr24")
-        
-        # Convert BGR to RGB for MediaPipe processing
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # 1. Process Frame and Extract Features
-        features, annotated_image_rgb, hand_detected = process_and_extract_features(image_rgb, self.hands_model)
-
-        # Convert back to BGR for display
-        annotated_image_bgr = cv2.cvtColor(annotated_image_rgb, cv2.COLOR_RGB2BGR)
-
-        # 2. Prediction (Only if hand is detected and model is available)
-        if hand_detected and self.model and self.le:
-            predicted_sign, confidence, _ = predict_sign(self.model, self.le, features)
-            self.prediction_result = f"{predicted_sign} ({confidence})"
-        elif self.model is None or self.le is None:
-            self.prediction_result = "MODEL ERROR"
-        else:
-            self.prediction_result = "NO HAND"
-
-        # 3. Overlay Prediction Text on the Frame
-        cv2.putText(
-            annotated_image_bgr, 
-            f"Prediction: {self.prediction_result}", 
-            (50, 50), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            1, (0, 255, 0), 2, cv2.LINE_AA
-        )
-
-        # Return the processed frame
-        return av.VideoFrame.from_ndarray(annotated_image_bgr, format="bgr24")
-
-
-# --- 4. CUSTOM STYLING (For beauty and responsiveness) ---
-
-def custom_styling():
-    """Injects custom CSS for a better UI/UX."""
-    st.markdown("""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
-        
-        :root {
-            --primary-color: #4CAF50; /* Green */
-            --secondary-color: #3F51B5; /* Indigo */
-            --background-color: #f0f2f6;
-            --card-color: #ffffff;
-            --text-color: #1f2937;
-        }
-
-        html, body, [data-testid="stAppViewContainer"] {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--background-color);
-        }
-        
-        /* Main Header/Title */
-        h1 {
-            color: var(--secondary-color);
-            text-align: center;
-            font-weight: 900;
-            padding-bottom: 10px;
-            border-bottom: 4px solid var(--primary-color);
-        }
-
-        /* Sidebar styling */
-        [data-testid="stSidebar"] {
-            background-color: var(--card-color);
-            padding: 20px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            border-radius: 12px;
-        }
-
-        /* Card/Main Content Area Styling */
-        .stCard {
-            background-color: var(--card-color);
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-            margin-bottom: 20px;
-        }
-
-        /* Prediction Result Box (For upload section) */
-        .prediction-box {
-            text-align: center;
-            padding: 30px;
-            margin-top: 20px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, var(--primary-color), #8BC34A);
-            color: white;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-        }
-        .prediction-sign {
-            font-size: 8rem; /* Large font size */
-            font-weight: 900;
-            line-height: 1;
-            margin: 0;
-        }
-        .prediction-confidence {
-            font-size: 1.5rem;
-            font-weight: 700;
-        }
-
-        /* Streamlit elements styling (buttons, radio) */
-        .stButton>button {
-            width: 100%;
-            border-radius: 8px;
-            border: 2px solid var(--secondary-color);
-            color: var(--secondary-color);
-            background-color: var(--card-color);
-            padding: 10px 20px;
-            font-weight: 700;
-            transition: all 0.2s ease-in-out;
-        }
-        .stButton>button:hover {
-            background-color: var(--secondary-color);
-            color: white;
-            box-shadow: 0 4px 8px rgba(63, 81, 181, 0.5);
-        }
-        
-        /* Mobile Responsiveness for Prediction Box */
-        @media (max-width: 600px) {
-            .prediction-sign {
-                font-size: 5rem;
-            }
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-
-# --- 5. MAIN STREAMLIT APPLICATION ---
-
-def main():
-    """The main function that runs the Streamlit application."""
-    custom_styling()
-    
-    st.title("🧏 Real-Time Sign Language Predictor")
-    
-    st.markdown("""
-        <div style="text-align: center; color: #555; margin-bottom: 20px; font-weight: 400;">
-            Live recognition for Characters, Numbers, and Words using classic ML models and MediaPipe.
-        </div>
-    """, unsafe_allow_html=True)
-
-
-    # --- Sidebar for Mode Selection ---
-    st.sidebar.header("⚙️ Select Recognition Mode")
-    
-    mode_options = list(MODEL_PATHS.keys())
-    selected_mode = st.sidebar.radio("Choose the dataset/model to use:", mode_options, index=0)
-    
-    # Load Model Assets
-    model, le = load_model_assets(selected_mode)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**Current Model:** `{selected_mode}`")
-
-    # --- Main Content Area - Live Prediction ---
-    st.header("1. Live Webcam Stream")
-    
-    if selected_mode == "Words":
-        st.info("The **Words** mode is ready, but requires your trained model files to be placed in `models/words/`.")
-
-    # Container for the live video stream
-    ctx = webrtc_streamer(
-        key="sign-language-recognition",
-        mode=WebRtcMode.SENDRECV,
-        client_settings=RTC_CONFIGURATION,
-        video_transformer_factory=lambda: MLVideoTransformer(model=model, le=le),
-        async_transform=True,
-    )
-    
-    if ctx.state.playing:
-        st.success("Camera is active! Frame the hand clearly for recognition.")
-    else:
-        st.info("Click 'Start' above to activate your webcam/mobile camera.")
-    
-    st.markdown("---")
-    
-    # --- Main Content Area - Upload Image ---
-    st.header("2. Upload Image (Single-Shot Test)")
-    
-    uploaded_file = st.file_uploader(
-        "Upload an image of a hand sign (PNG/JPG)", 
-        type=['png', 'jpg', 'jpeg'], 
-        disabled=(model is None or le is None)
-    )
-    
-    if uploaded_file is not None:
+    def recv(self, frame):
         try:
-            image = Image.open(uploaded_file).convert("RGB")
+            self.frame_count += 1
+            img = frame.to_ndarray(format="bgr24")
+            h, w = img.shape[:2]
+            # Process every 2nd frame to improve performance
+            if self.frame_count % 2 == 0:
+                label, prob = predict(self.model, self.le, img)
+                bboxes = preprocess_image(img)[1]  # Get bboxes
+                # Stabilize predictions
+                if label == self.prev_label and label is not None:
+                    self.stable_count += 1
+                    if self.stable_count >= 5:  # Require 5 consistent frames
+                        self.stable_label = label
+                        self.stable_prob = prob
+                else:
+                    self.stable_count = 0
+                    self.prev_label = label
+                    if label != self.stable_label:
+                        self.stable_label = None
+                        self.stable_prob = 0.0
+            else:
+                bboxes = preprocess_image(img)[1]  # Get bboxes for display
             
-            col_up_img, col_up_pred = st.columns(2)
+            # Draw bounding box(es)
+            if bboxes:
+                for bbox in bboxes:
+                    x1, y1, x2, y2 = bbox
+                    # Draw white bounding box
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 255), 1, lineType=cv2.LINE_AA)
+                    # Draw prediction on primary box (first hand or merged)
+                    if self.stable_label:
+                        # Semi-transparent black rectangle for text background
+                        overlay = img.copy()
+                        rect_y = y2 - 40  # Position at bottom of box
+                        cv2.rectangle(overlay, (x1, rect_y), (x2, y2), (0, 0, 0), -1)
+                        alpha = 0.6
+                        cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+                        # Draw stable prediction text (large, bold, green, centered)
+                        text = self.stable_label
+                        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)
+                        text_x = x1 + (x2 - x1 - text_size[0]) // 2  # Center in box
+                        cv2.putText(img, text, (text_x, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA)
             
-            # Display the uploaded image
-            with col_up_img:
-                st.image(image, caption='Uploaded Sign', use_column_width=True)
-                
-            # Perform prediction
-            with col_up_pred:
-                with st.spinner('Analyzing uploaded sign...'):
-                    # Convert PIL to BGR NumPy array for processing
-                    image_np = np.array(image)
-                    image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-
-                    # 1. Process Frame and Extract Features (using RGB input for the function)
-                    # We pass RGB and the function will handle conversion/processing
-                    features, _, hand_detected = process_and_extract_features(image_np, hands)
-                    
-                    if hand_detected:
-                        # 2. Predict the sign
-                        predicted_sign, confidence, _ = predict_sign(model, le, features)
-
-                        # 3. Display the result beautifully
-                        st.markdown("<h3>Prediction Result:</h3>", unsafe_allow_html=True)
-                        st.markdown(f"""
-                            <div class="prediction-box">
-                                <p class="prediction-sign">{predicted_sign}</p>
-                                <p class="prediction-confidence">Confidence: {confidence}</p>
-                            </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.warning("No hand landmarks were detected in the uploaded image.")
-
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
         except Exception as e:
-            st.error(f"Error processing uploaded file: {e}")
+            img = frame.to_ndarray(format="bgr24")
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-if __name__ == "__main__":
-    main()
+# Main app
+st.title("Sign Language Predictor")
+st.write("Predict numbers or characters (A-Z) in real-time using your webcam (laptop or mobile). Predictions appear on the bounding box around your hand(s).")
+
+# Model and camera selection
+st.header("Live Prediction")
+model_type = st.selectbox("Select Model", ["Combined (Chars + Numbers)", "Characters Only", "Numbers Only"])
+if model_type == "Combined (Chars + Numbers)":
+    selected_model, selected_le = combined_model, combined_le
+elif model_type == "Characters Only":
+    selected_model, selected_le = chars_model, chars_le
+else:
+    selected_model, selected_le = nums_model, nums_le
+
+camera_side = st.selectbox("Camera Facing", ["Front", "Back"])
+facing_mode = "user" if camera_side == "Front" else "environment"
+
+# RTC config for STUN
+rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+
+def video_factory():
+    return VideoProcessor(selected_model, selected_le, facing_mode)
+
+# Start webcam with optimized settings
+webrtc_ctx = webrtc_streamer(
+    key="live",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=rtc_config,
+    video_processor_factory=video_factory,
+    media_stream_constraints={"video": {"facingMode": facing_mode, "width": 320, "height": 240}, "audio": False},
+    async_processing=True,
+)
+
+# About section
+st.header("About")
+st.write("This app uses your trained models for real-time sign language recognition.")
+st.write("Predictions appear on the bounding box around your hand(s) when stable for ~5 frames.")
+st.write("Assumptions: Models expect 84 MediaPipe hand landmark features from webcam input.")
+st.write("Troubleshooting: If predictions don't appear, ensure hands are visible and check browser console for errors.")

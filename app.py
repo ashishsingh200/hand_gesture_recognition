@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 import cv2
 from io import BytesIO
-from streamlit_drawable_canvas import st_canvas  # Requires: pip install streamlit-drawable-canvas
+from streamlit_drawable_canvas import st_canvas  # type: ignore # Requires: pip install streamlit-drawable-canvas
 
 # Custom CSS for a beautiful and user-friendly UI
 st.markdown("""

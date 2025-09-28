@@ -1,8 +1,7 @@
 streamlit
-streamlit-option-menu
-torch
-torchvision
+numpy
+pandas
 opencv-python-headless
 pillow
-numpy
-xgboost
+scikit-learn==1.3.2
+xgboost==2.0.3

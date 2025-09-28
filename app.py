@@ -2,9 +2,8 @@ import streamlit as st
 import pickle
 import numpy as np
 from PIL import Image
-import cv2
 from io import BytesIO
-from streamlit_drawable_canvas import st_canvas  # type: ignore # Requires: pip install streamlit-drawable-canvas
+from streamlit_drawable_canvas import st_canvas  # Requires: pip install streamlit-drawable-canvas
 
 # Custom CSS for a beautiful and user-friendly UI
 st.markdown("""
@@ -74,7 +73,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Paths to models and labels (update if needed)
+# Paths to models and labels (update if needed; use relative paths for cloud)
 CHAR_NUM_MODEL_PATH = 'character and numbers/models/best_model.p'
 CHAR_NUM_LABELS_PATH = 'character and numbers/models/labels.p'
 
@@ -85,8 +84,8 @@ NUM_MODEL_PATH = 'Numbers/models/best_model.p'
 NUM_LABELS_PATH = 'Numbers/models/labels.p'
 
 # Placeholder for word model (add your actual paths when ready)
-WORD_MODEL_PATH = 'words/models/best_model.p'  
-WORD_LABELS_PATH = 'words/models/labels.p'    
+WORD_MODEL_PATH = 'words/models/best_model.p'  # Assuming you'll save it here
+WORD_LABELS_PATH = 'words/models/labels.p'    # Assuming you'll save it here
 
 # Function to load model and labels
 @st.cache_resource
@@ -107,7 +106,7 @@ try:
     word_model, word_labels = load_model_and_labels(WORD_MODEL_PATH, WORD_LABELS_PATH)
 except FileNotFoundError:
     word_model, word_labels = None, None
-    st.warning("Word model not found. Word prediction will use character+number model with segmentation as fallback.")
+    st.warning("Word model not found. Word prediction will use character+number model with numpy-based segmentation as fallback.")
 
 # Preprocess image (assuming 28x28 grayscale, flattened, normalized)
 def preprocess_image(image):
@@ -125,7 +124,7 @@ def predict_single(model, labels, image):
     pred_index = model.predict(features)[0]
     return labels[pred_index]
 
-# Word prediction with segmentation (using OpenCV for contour detection)
+# Word prediction with segmentation (using numpy for contour-like detection)
 def predict_word(image, use_fallback=True):
     # If word model exists, use it; else fallback to segmentation with char_num_model
     if word_model is not None:
@@ -134,36 +133,68 @@ def predict_word(image, use_fallback=True):
         pred = word_model.predict(features)[0]
         return word_labels[pred] if isinstance(word_labels, list) else word_labels[pred]
     elif use_fallback:
-        # Fallback: Segment image into characters using char_num_model
+        # Fallback: Segment image into characters using numpy
         if isinstance(image, BytesIO):
             image.seek(0)
-            buf = np.frombuffer(image.read(), np.uint8)
-            img = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+            img = np.array(Image.open(image).convert('L'))
         elif isinstance(image, np.ndarray):
-            img = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
+            if len(image.shape) == 3:
+                # Convert RGB to grayscale
+                img = np.dot(image[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+            else:
+                img = image
         else:
             img = np.array(Image.open(image).convert('L'))
         
-        # Thresholding
-        _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+        # Binarize (assume dark text on light background; adjust threshold if needed)
+        binary = (img < 128).astype(np.uint8)
         
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Vertical projection to find character widths
+        proj = np.sum(binary, axis=0)
         
-        # Sort contours left to right
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+        # Find start and end of each character (where projection > 0)
+        mask = proj > 0
+        diff = np.diff(mask.astype(int))
+        starts = np.where(diff == 1)[0] + 1
+        ends = np.where(diff == -1)[0] + 1
+        
+        if mask[0]:
+            starts = np.insert(starts, 0, 0)
+        if mask[-1]:
+            ends = np.append(ends, len(proj))
         
         word = ''
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            if w * h < 100:  # Ignore small noise (adjust threshold as needed)
+        for s, e in zip(starts, ends):
+            if e - s < 5:  # Ignore small noise (adjust threshold as needed)
                 continue
-            char_img = img[y:y+h, x:x+w]
-            char_img = cv2.resize(char_img, (28, 28)) / 255.0
-            features = char_img.flatten().reshape(1, -1)
+            
+            char_img = img[:, s:e]
+            
+            # Optional: Trim vertically for better accuracy
+            char_binary = binary[:, s:e]
+            v_proj = np.sum(char_binary, axis=1)
+            v_mask = v_proj > 0
+            v_diff = np.diff(v_mask.astype(int))
+            v_starts = np.where(v_diff == 1)[0] + 1
+            v_ends = np.where(v_diff == -1)[0] + 1
+            
+            if v_mask[0]:
+                v_starts = np.insert(v_starts, 0, 0)
+            if v_mask[-1]:
+                v_ends = np.append(v_ends, len(v_proj))
+            
+            if len(v_starts) > 0:
+                top, bottom = v_starts[0], v_ends[0]  # Take the main block
+                char_img = char_img[top:bottom, :]
+            
+            # Resize to 28x28
+            char_pil = Image.fromarray(char_img).resize((28, 28))
+            char_array = np.array(char_pil) / 255.0
+            features = char_array.flatten().reshape(1, -1)
             pred_index = char_num_model.predict(features)[0]
             word += char_num_labels[pred_index]
-        return word
+        
+        return word if word else "No characters detected"
     else:
         return "Word model not available."
 

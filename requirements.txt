@@ -1,7 +1,8 @@
-streamlit==1.49.1
-numpy==1.26.4
-pillow==11.3.0
-scikit-learn==1.7.2
-streamlit-drawable-canvas==0.9.3
-mediapipe==0.10.21  # Add this if you're using MediaPipe; it requires numpy <2.0
-xgboost==3.0.5
+streamlit
+streamlit-option-menu
+torch
+torchvision
+opencv-python-headless
+pillow
+numpy
+xgboost
